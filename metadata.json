@@ -1,0 +1,5 @@
+{
+  "name": "FinVoice: AI Personal Finance",
+  "description": "A conversational personal finance assistant that helps you track spending and get insights via voice.",
+  "requestFramePermissions": ["microphone"]
+}

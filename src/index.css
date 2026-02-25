@@ -1,0 +1,55 @@
+@import "tailwindcss";
+
+@theme {
+  --color-bg-main: #0b0f14;
+  --color-bg-card: #0c131d;
+  --color-border-subtle: #1b2533;
+  --color-accent-blue: #2aa6ff;
+  --color-accent-green: #2bd576;
+  --color-accent-orange: #f5b942;
+  --color-accent-red: #ff5c5c;
+  --color-text-muted: #9aa7b6;
+}
+
+@layer base {
+  body {
+    @apply bg-bg-main text-white font-sans;
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+}
+
+@layer components {
+  .bills-card {
+    @apply bg-bg-card border border-border-subtle rounded-2xl p-4 mb-4;
+  }
+  
+  .bills-row {
+    @apply flex justify-between items-center py-3 border-b border-border-subtle last:border-b-0;
+  }
+  
+  .bills-btn {
+    @apply border border-accent-blue bg-bg-card text-white px-4 py-4 rounded-xl font-extrabold text-lg w-full min-h-[64px] transition-all active:scale-95 cursor-pointer;
+  }
+  
+  .bills-btn-small {
+    @apply px-3 py-2 rounded-xl font-bold text-sm cursor-pointer border border-border-subtle bg-bg-card text-white hover:bg-slate-800 transition-colors;
+  }
+
+  .bills-input {
+    @apply bg-bg-card text-white border border-border-subtle rounded-xl p-3.5 w-full focus:outline-none focus:border-accent-blue;
+  }
+
+  .toggle-switch {
+    @apply appearance-none w-12 h-6.5 bg-border-subtle rounded-full relative cursor-pointer outline-none transition-colors checked:bg-accent-blue;
+  }
+
+  .toggle-switch::after {
+    content: "";
+    @apply absolute top-0.5 left-0.5 w-5.5 h-5.5 rounded-full bg-[#9aa7b6] transition-transform;
+  }
+
+  .toggle-switch:checked::after {
+    @apply translate-x-5.5 bg-white;
+  }
+}
