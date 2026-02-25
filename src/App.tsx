@@ -725,7 +725,9 @@ export default function App() {
     const functionResponses = [];
     try {
       for (const call of action.calls) {
-        const { name, args, id } = call as any;
+        const { name, id } = call as any;
+        const args = { ...call.args };
+        if (args.amount !== undefined) args.amount = parseFloat(args.amount) || 0;
         let result;
         if (name === "addBill") result = await addBill({ ...args, phase: parseInt(args.phase) });
         if (name === "toggleBillStatus") result = await toggleBillStatus(args);
@@ -2055,11 +2057,11 @@ export default function App() {
 
             <div>
               <label className="text-[10px] font-black text-text-muted uppercase mb-1 block">Amount</label>
-              <input 
+              <input
                 autoFocus={activeModal.type !== 'bill' && activeModal.type !== 'expense'}
-                type="number" 
+                type="number"
                 step="0.01"
-                value={activeModal.amount === 0 ? '0' : (activeModal.amount || '')} 
+                value={activeModal.amount === 0 ? '0' : (activeModal.amount || '')}
                 onChange={(e) => setActiveModal({ ...activeModal, amount: parseFloat(e.target.value) || 0 })}
                 onFocus={(e) => e.target.select()}
                 onKeyDown={handleKeyDown}
@@ -2401,13 +2403,22 @@ export default function App() {
                                     {key.toLowerCase().includes('amount') ? (
                                       <>
                                         <span className="absolute left-3 top-1/2 -translate-y-1/2 text-accent-blue font-black text-xs group-focus-within:text-white transition-colors">$</span>
-                                        <input 
-                                          type="number"
-                                          step="0.01"
-                                          value={val as number}
+                                        <input
+                                          type="text"
+                                          inputMode="decimal"
+                                          value={typeof val === 'string' ? val : Number(val).toFixed(2)}
                                           onChange={(e) => {
+                                            const raw = e.target.value;
+                                            if (raw === '' || /^\d*\.?\d{0,2}$/.test(raw)) {
+                                              const newCalls = [...pendingAction.calls];
+                                              newCalls[idx] = { ...newCalls[idx], args: { ...newCalls[idx].args, [key]: raw } };
+                                              setPendingAction({ calls: newCalls });
+                                            }
+                                          }}
+                                          onBlur={(e) => {
+                                            const parsed = parseFloat(e.target.value) || 0;
                                             const newCalls = [...pendingAction.calls];
-                                            newCalls[idx] = { ...newCalls[idx], args: { ...newCalls[idx].args, [key]: parseFloat(e.target.value) } };
+                                            newCalls[idx] = { ...newCalls[idx], args: { ...newCalls[idx].args, [key]: parsed } };
                                             setPendingAction({ calls: newCalls });
                                           }}
                                           className="w-full bg-black/40 border border-white/10 rounded-xl pl-7 pr-3 py-2.5 text-xs font-black text-accent-blue focus:border-accent-blue focus:bg-black/60 outline-none transition-all"
