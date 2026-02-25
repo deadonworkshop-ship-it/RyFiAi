@@ -1,30 +1,21 @@
-/**
- * @license
- * SPDX-License-Identifier: Apache-2.0
- */
-
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { GoogleGenAI, Modality, LiveServerMessage, Type } from "@google/genai";
-import { 
-  Mic, 
-  MicOff, 
-  Menu, 
-  X, 
-  ChevronRight, 
-  Home, 
-  CreditCard, 
-  TrendingDown, 
-  TrendingUp, 
-  PiggyBank, 
-  BarChart3, 
-  Settings, 
-  Plus,
+import {
+  MessageSquare,
+  Send,
+  X,
+  ChevronRight,
+  Home,
+  CreditCard,
+  TrendingDown,
+  TrendingUp,
+  PiggyBank,
+  BarChart3,
+  Settings,
   Loader2,
   Wallet,
   History,
   PieChart as PieChartIcon,
   Check,
-  RotateCcw,
   Trash2,
   Download,
   Upload,
@@ -97,9 +88,6 @@ const DEFAULT_CATEGORIES = {
 
 const CREDIT_CARDS = DEFAULT_CATEGORIES.debt.filter(d => d.toLowerCase().includes('card'));
 
-const SAMPLE_RATE = 24000;
-const CHUNK_SIZE = 4096;
-
 const formatMoney = (amount: number) => new Intl.NumberFormat('en-US', { 
   style: 'currency', 
   currency: 'USD',
@@ -143,7 +131,9 @@ export default function App() {
     const d = new Date();
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
   });
-  const [showVoicePanel, setShowVoicePanel] = useState(false);
+  const [showCommandPanel, setShowCommandPanel] = useState(false);
+  const [commandInput, setCommandInput] = useState('');
+  const [commandHistory, setCommandHistory] = useState<{ input: string; result: string; success: boolean }[]>([]);
   const [backupEmail, setBackupEmail] = useState('');
   const [isSavingEmail, setIsSavingEmail] = useState(false);
   const [rawDbData, setRawDbData] = useState<any>(null);
@@ -156,7 +146,7 @@ export default function App() {
     pendingActionRef.current = action;
   };
   const [currentBalance, setCurrentBalance] = useState<number>(0);
-  const [lastUpdated, setLastUpdated] = useState<number | null>(null);
+  const [lastSynced, setLastSynced] = useState<Date | null>(null);
 
   // --- Helpers ---
   const getHistoricalData = (trackerType?: string | 'networth') => {
@@ -197,40 +187,13 @@ export default function App() {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // --- Voice AI State ---
-  const [isRecording, _setIsRecording] = useState(false);
-  const isRecordingRef = useRef(false);
-  const setIsRecording = (val: boolean) => {
-    _setIsRecording(val);
-    isRecordingRef.current = val;
-  };
-  const [isConnecting, setIsConnecting] = useState(false);
-  const [aiStatus, setAiStatus] = useState<'idle' | 'listening' | 'thinking' | 'speaking'>('idle');
-  
   // --- Refs for Data Consistency ---
   const billsRef = useRef<Bill[]>([]);
   const snapshotsRef = useRef<Snapshot[]>([]);
-  const expensesRef = useRef<GlobalExpense[]>([]);
-  const flowsRef = useRef<Flow[]>([]);
-  const currentBalanceRef = useRef<number>(0);
-  const summaryRef = useRef<Summary | null>(null);
-  const analyticsRef = useRef<any>(null);
+  const commandInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => { billsRef.current = bills; }, [bills]);
   useEffect(() => { snapshotsRef.current = snapshots; }, [snapshots]);
-  useEffect(() => { expensesRef.current = expenses; }, [expenses]);
-  useEffect(() => { flowsRef.current = flows; }, [flows]);
-  useEffect(() => { currentBalanceRef.current = currentBalance; }, [currentBalance]);
-  useEffect(() => { summaryRef.current = summary; }, [summary]);
-  useEffect(() => { analyticsRef.current = analytics; }, [analytics]);
-  
-  // --- Refs ---
-  const audioContextRef = useRef<AudioContext | null>(null);
-  const streamRef = useRef<MediaStream | null>(null);
-  const processorRef = useRef<ScriptProcessorNode | null>(null);
-  const sessionRef = useRef<any>(null);
-  const audioQueueRef = useRef<Int16Array[]>([]);
-  const isPlayingRef = useRef(false);
 
   // --- Data Fetching ---
   const fetchData = useCallback(async () => {
@@ -268,6 +231,7 @@ export default function App() {
 
       setExpenses(storedExpenses);
       setCurrentBalance(parseFloat(storedBalance));
+      setLastSynced(new Date());
     } catch (err) {
       console.error("Failed to load data:", err);
       setError("Failed to load data from server.");
@@ -341,550 +305,249 @@ export default function App() {
     seedData();
   }, [activeMonth, fetchData]);
 
-  // --- Audio Utilities ---
-  const floatTo16BitPCM = (input: Float32Array) => {
-    const output = new Int16Array(input.length);
-    for (let i = 0; i < input.length; i++) {
-      const s = Math.max(-1, Math.min(1, input[i]));
-      output[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+  // --- Command Bar: Fuzzy Matching ---
+  const findBill = (search: string): Bill | undefined => {
+    const terms = search.toLowerCase().split(/\s+/).filter(Boolean);
+    if (!terms.length) return undefined;
+    const currentBills = billsRef.current;
+    // Exact name match
+    let bill = currentBills.find(b => b.name.toLowerCase() === search.toLowerCase());
+    // Partial match (all terms must match)
+    if (!bill) bill = currentBills.find(b => terms.every(t => b.name.toLowerCase().includes(t)));
+    // Any term match
+    if (!bill) bill = currentBills.find(b => terms.some(t => b.name.toLowerCase().includes(t)));
+    return bill;
+  };
+
+  const findAccount = (search: string): { tracker: string; account: string } | undefined => {
+    const lower = search.toLowerCase();
+    const allCategories = Object.entries(DEFAULT_CATEGORIES);
+    for (const [tracker, accounts] of allCategories) {
+      // Exact match
+      const exact = accounts.find(a => a.toLowerCase() === lower);
+      if (exact) return { tracker, account: exact };
     }
-    return output;
-  };
-
-  const base64ToUint8Array = (base64: string) => {
-    const binaryString = window.atob(base64);
-    const len = binaryString.length;
-    const bytes = new Uint8Array(len);
-    for (let i = 0; i < len; i++) {
-      bytes[i] = binaryString.charCodeAt(i);
+    for (const [tracker, accounts] of allCategories) {
+      // Partial match
+      const partial = accounts.find(a => a.toLowerCase().includes(lower) || lower.includes(a.toLowerCase()));
+      if (partial) return { tracker, account: partial };
     }
-    return bytes;
+    // Word-level match
+    const words = lower.split(/\s+/);
+    for (const [tracker, accounts] of allCategories) {
+      const match = accounts.find(a => words.some(w => a.toLowerCase().includes(w)));
+      if (match) return { tracker, account: match };
+    }
+    return undefined;
   };
 
-  // --- Live API Tools ---
-  const addBill = async (args: any) => {
-    try {
-      addBillLocal(args.name, args.amount, args.phase);
-      return { status: "success", message: `Bill '${args.name}' added.` };
-    } catch (err) { return { status: "error", message: String(err) }; }
-  };
+  // --- Command Bar: Parser ---
+  const parseCommand = (input: string): { action: any; message: string } | { error: string } => {
+    const trimmed = input.trim();
+    if (!trimmed) return { error: "Type a command. Try 'help' for options." };
 
-  const addFlow = async (args: any) => {
-    try {
-      addFlowLocal(args.tracker, args.account, args.amount, args.description);
-      return { status: "success", message: `${args.tracker} entry added.` };
-    } catch (err) { return { status: "error", message: String(err) }; }
-  };
+    const lower = trimmed.toLowerCase();
+    const words = lower.split(/\s+/);
 
-  const updateSnapshot = async (args: any) => {
-    try {
-      const currentSnapshots = snapshotsRef.current;
-      addSnapshotLocal(args.tracker, args.account, args.amount);
-      return { status: "success", message: `Balance for '${args.account}' updated.` };
-    } catch (err) { return { status: "error", message: String(err) }; }
-  };
+    // Extract dollar amount (with optional $ prefix and commas)
+    const amountMatch = trimmed.match(/\$?([\d,]+\.?\d*)/);
+    const amount = amountMatch ? parseFloat(amountMatch[1].replace(/,/g, '')) : undefined;
 
-  const updateCurrentBalance = async (args: any) => {
-    try {
-      updateBalance(args.amount);
-      return { status: "success", message: `Current balance updated to ${formatMoney(args.amount)}.` };
-    } catch (err) { return { status: "error", message: String(err) }; }
-  };
+    // Extract date (YYYY-MM-DD or common formats)
+    const dateMatch = trimmed.match(/(\d{4}-\d{2}-\d{2})/);
+    const today = new Date().toISOString().split('T')[0];
 
-  const toggleBillStatus = async (args: any) => {
-    try {
-      const currentBills = billsRef.current;
-      const searchName = args.name.toLowerCase();
-      let bill = currentBills.find(b => b.name.toLowerCase() === searchName);
-      if (!bill) bill = currentBills.find(b => b.name.toLowerCase().includes(searchName));
-      if (!bill) {
-        const words = searchName.split(' ');
-        bill = currentBills.find(b => words.some(word => b.name.toLowerCase().includes(word)));
-      }
-      
-      if (!bill) return { status: "error", message: `Could not find a bill matching '${args.name}'.` };
-      
-      const updatedBills = currentBills.map(b => {
-        if (b.id === bill!.id) {
-          return {
-            ...b,
-            paid: args.paid === undefined ? true : args.paid,
-            amount: args.amount ?? b.amount,
-            date: args.date ?? b.date
-          };
-        }
-        return b;
-      });
-      
-      saveToLocal(`bills_${activeMonth}`, updatedBills);
-      return { status: "success", message: `Bill '${bill.name}' updated and marked as paid.` };
-    } catch (err) { return { status: "error", message: String(err) }; }
-  };
+    // --- HELP ---
+    if (words[0] === 'help') {
+      return { error: [
+        "Commands:",
+        "  pay <bill>              Mark a bill as paid",
+        "  pay <bill> <amount>     Pay bill with specific amount",
+        "  unpay <bill>            Mark a bill as unpaid",
+        "  balance <amount>        Set current balance",
+        "  <account> <amount>      Update any account balance",
+        "  income <source> <amt>   Log income",
+        "  add <name> <amount>     Add a new bill",
+        "  delete <bill>           Delete a bill",
+        "  debt <card> <amount>    Log a credit card payment",
+      ].join("\n") };
+    }
 
-  const updateBillAmount = async (args: any) => {
-    try {
-      const bill = bills.find(b => b.name.toLowerCase().includes(args.name.toLowerCase()));
-      if (!bill) return { status: "error", message: `Could not find a bill named '${args.name}'.` };
-      updateBillLocal(bill.id, { amount: args.amount });
-      return { status: "success", message: `Amount for '${bill.name}' updated to ${formatMoney(args.amount)}.` };
-    } catch (err) { return { status: "error", message: String(err) }; }
-  };
-
-  const addDebtPayment = async (args: any) => {
-    try {
-      addDebtPaymentLocal(args.account, args.amount);
-      return { status: "success", message: `Debt payment of ${formatMoney(args.amount)} logged for ${args.account}.` };
-    } catch (err) { return { status: "error", message: String(err) }; }
-  };
-
-  const addGlobalExpense = async (args: any) => {
-    try {
-      const newExp: GlobalExpense = { id: Date.now(), name: args.name, amount: args.amount, paid: false };
-      saveToLocal('global_expenses', [...expenses, newExp]);
-      return { status: "success", message: `Global expense '${args.name}' added.` };
-    } catch (err) { return { status: "error", message: String(err) }; }
-  };
-
-  const deleteBill = async (args: any) => {
-    try {
-      const bill = bills.find(b => b.name.toLowerCase().includes(args.name.toLowerCase()));
-      if (!bill) return { status: "error", message: `Could not find a bill named '${args.name}'.` };
-      const updated = bills.filter(b => b.id !== bill.id);
-      saveToLocal(`bills_${activeMonth}`, updated);
-      return { status: "success", message: `Bill '${bill.name}' deleted.` };
-    } catch (err) { return { status: "error", message: String(err) }; }
-  };
-
-  const getFinancialStatus = async () => {
-    try {
+    // --- PAY / POSTED / CLEARED ---
+    if (words[0] === 'pay' || lower.includes('posted') || lower.includes('cleared')) {
+      const searchText = lower
+        .replace(/^pay\s+/, '')
+        .replace(/\s*(posted|cleared)\s*/, ' ')
+        .replace(/\$?[\d,]+\.?\d*/g, '')
+        .replace(/\d{4}-\d{2}-\d{2}/g, '')
+        .trim();
+      const bill = findBill(searchText);
+      if (!bill) return { error: `Could not find a bill matching "${searchText}". Check your spelling.` };
       return {
-        currentBalance: currentBalanceRef.current,
-        summary: summaryRef.current,
-        analytics: analyticsRef.current,
-        unpaidBills: billsRef.current.filter(b => !b.paid),
-        activeMonth,
-        snapshots: snapshotsRef.current
+        action: { calls: [{ name: 'toggleBillStatus', args: { name: bill.name, paid: true, amount: amount ?? bill.amount, date: dateMatch?.[1] ?? today }, id: `cmd-${Date.now()}` }] },
+        message: `Pay ${bill.name} — ${formatMoney(amount ?? bill.amount)}`
       };
-    } catch (err) { return { error: "Failed to fetch status" }; }
+    }
+
+    // --- UNPAY ---
+    if (words[0] === 'unpay') {
+      const searchText = lower.replace(/^unpay\s+/, '').trim();
+      const bill = findBill(searchText);
+      if (!bill) return { error: `Could not find a bill matching "${searchText}".` };
+      return {
+        action: { calls: [{ name: 'toggleBillStatus', args: { name: bill.name, paid: false, amount: bill.amount, date: bill.date ?? '' }, id: `cmd-${Date.now()}` }] },
+        message: `Unpay ${bill.name}`
+      };
+    }
+
+    // --- BALANCE ---
+    if (words[0] === 'balance' && amount !== undefined) {
+      return {
+        action: { calls: [{ name: 'updateCurrentBalance', args: { amount }, id: `cmd-${Date.now()}` }] },
+        message: `Set balance to ${formatMoney(amount)}`
+      };
+    }
+
+    // --- INCOME ---
+    if (words[0] === 'income') {
+      const rest = trimmed.slice(6).trim();
+      const incomeAmountMatch = rest.match(/\$?([\d,]+\.?\d*)/);
+      const incomeAmount = incomeAmountMatch ? parseFloat(incomeAmountMatch[1].replace(/,/g, '')) : undefined;
+      if (!incomeAmount) return { error: "Usage: income <source> <amount> [description]" };
+      const beforeAmount = rest.slice(0, rest.indexOf(incomeAmountMatch![0])).trim();
+      const afterAmount = rest.slice(rest.indexOf(incomeAmountMatch![0]) + incomeAmountMatch![0].length).trim();
+      const source = beforeAmount || 'Miscellaneous';
+      // Match against income categories
+      const matched = DEFAULT_CATEGORIES.income.find(s => s.toLowerCase().includes(source.toLowerCase())) || source;
+      return {
+        action: { calls: [{ name: 'addFlow', args: { tracker: 'income', account: matched, amount: incomeAmount, description: afterAmount || undefined, date: dateMatch?.[1] ?? today }, id: `cmd-${Date.now()}` }] },
+        message: `Log ${formatMoney(incomeAmount)} income from ${matched}`
+      };
+    }
+
+    // --- ADD BILL ---
+    if (words[0] === 'add') {
+      const rest = trimmed.slice(3).trim();
+      const addAmountMatch = rest.match(/\$?([\d,]+\.?\d*)/);
+      const addAmount = addAmountMatch ? parseFloat(addAmountMatch[1].replace(/,/g, '')) : undefined;
+      if (!addAmount) return { error: "Usage: add <bill name> <amount>" };
+      const name = rest.slice(0, rest.indexOf(addAmountMatch![0])).trim();
+      if (!name) return { error: "Usage: add <bill name> <amount>" };
+      const phase = new Date().getDate() <= 15 ? '1' : '2';
+      return {
+        action: { calls: [{ name: 'addBill', args: { name, amount: addAmount, phase }, id: `cmd-${Date.now()}` }] },
+        message: `Add bill "${name}" — ${formatMoney(addAmount)}`
+      };
+    }
+
+    // --- DELETE ---
+    if (words[0] === 'delete' || words[0] === 'remove') {
+      const searchText = lower.replace(/^(delete|remove)\s+/, '').trim();
+      const bill = findBill(searchText);
+      if (!bill) return { error: `Could not find a bill matching "${searchText}".` };
+      return {
+        action: { calls: [{ name: 'deleteBill', args: { name: bill.name }, id: `cmd-${Date.now()}` }] },
+        message: `Delete bill "${bill.name}"`
+      };
+    }
+
+    // --- DEBT PAYMENT ---
+    if (words[0] === 'debt' && amount !== undefined) {
+      const searchText = lower.replace(/^debt\s+/, '').replace(/\$?[\d,]+\.?\d*/g, '').trim();
+      const card = CREDIT_CARDS.find(c => c.toLowerCase().includes(searchText)) || CREDIT_CARDS[0];
+      return {
+        action: { calls: [{ name: 'addDebtPayment', args: { account: card, amount }, id: `cmd-${Date.now()}` }] },
+        message: `Log ${formatMoney(amount)} payment on ${card}`
+      };
+    }
+
+    // --- GENERIC: <account/bill name> <amount> → update snapshot or pay bill ---
+    if (amount !== undefined) {
+      const searchText = lower.replace(/\$?[\d,]+\.?\d*/g, '').replace(/\d{4}-\d{2}-\d{2}/g, '').trim();
+      // Try account first
+      const acct = findAccount(searchText);
+      if (acct) {
+        return {
+          action: { calls: [{ name: 'updateSnapshot', args: { tracker: acct.tracker, account: acct.account, amount }, id: `cmd-${Date.now()}` }] },
+          message: `Update ${acct.account} to ${formatMoney(amount)}`
+        };
+      }
+      // Try bill
+      const bill = findBill(searchText);
+      if (bill) {
+        return {
+          action: { calls: [{ name: 'toggleBillStatus', args: { name: bill.name, paid: true, amount, date: dateMatch?.[1] ?? today }, id: `cmd-${Date.now()}` }] },
+          message: `Pay ${bill.name} — ${formatMoney(amount)}`
+        };
+      }
+    }
+
+    return { error: `Couldn't understand "${trimmed}". Type 'help' for available commands.` };
   };
 
-  // --- Live API Connection ---
-  const connectVoice = async () => {
-    if (isConnecting) return;
-    setIsConnecting(true);
-    setAiStatus('thinking');
-
-    try {
-      // Initialize AudioContext immediately on user interaction
-      if (!audioContextRef.current) {
-        const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
-        try {
-          audioContextRef.current = new AudioContextClass({ sampleRate: 24000 });
-        } catch (e) {
-          audioContextRef.current = new AudioContextClass();
-        }
-      }
-      if (audioContextRef.current.state === 'suspended') {
-        await audioContextRef.current.resume();
-      }
-
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-      
-      const session = await ai.live.connect({
-        model: "gemini-2.5-flash-native-audio-preview-09-2025",
-        config: {
-          responseModalities: [Modality.AUDIO],
-          speechConfig: {
-            voiceConfig: { prebuiltVoiceConfig: { voiceName: "Kore" } },
-          },
-          systemInstruction: `You are Finny, a world-class bookkeeper and CFP for Ryan's Finance Dashboard (BillsOps).
-          
-          CORE PRINCIPLE:
-          You are Ryan's interface to his financial data. When you call a tool to change data (add, update, delete, toggle, updateSnapshot), it appears in a "Review & Execute" window on his screen.
-          
-          WORKFLOW:
-          1. Search & Match: When Ryan mentions a bill (e.g., "mortgage") or an investment account (e.g., "401k"), ALWAYS call 'getFinancialStatus' first. Look through the 'bills' or 'snapshots' list to find the closest match.
-          2. Queue Action: 
-             - For bills: Call 'toggleBillStatus'. You MUST include the bill's current 'amount' and 'date' from the financial status.
-             - For investments/debt/savings: Call 'updateSnapshot' with the correct tracker (investment, debt, or savings) and account name.
-          3. Voice Approval: Ryan may say "That's correct", "Go ahead", or "Prosecute". When he does, you MUST call 'executePendingAction' IMMEDIATELY. This is the only way to finalize the changes. "Prosecute" is his favorite word for this.
-          4. Voice Correction: Ryan may say "Actually it was $50". When he does, simply call the original tool again with the corrected info. It will update the preview on his screen.
-          
-          CRITICAL: If Ryan says "Prosecute", do not talk back first. Call the tool 'executePendingAction' immediately.
-          
-          GUIDELINES:
-          - INVESTMENTS/TAX/RETIREMENT: Ryan wants to verbally update his investment, tax, and retirement balances. Use 'updateSnapshot' for this.
-          - INCOME: Ryan wants to log his income. Use 'addFlow' for this.
-          - MANDATORY: Always provide 'amount' and 'date' when calling 'toggleBillStatus'. Ryan will not approve without seeing these.
-          - BE INTELLIGENT: If Ryan says "X posted", find the closest match in his bills. Don't ask him for the exact name if you can find it yourself.
-          - BE DECISIVE: Queue the action immediately after finding the match. Say "I've found your [Item Name] and queued it for [Amount]. Is that correct?"
-          - CONCISE BUT COMMUNICATIVE: Ryan is a high-performer. No fluff. No "I'd be happy to". But ALWAYS confirm what you've done. "Done. Queued for approval." or "Updated your balance."
-          - AFTER EXECUTION: After calling 'executePendingAction', ALWAYS say something like "Done. I've updated your records." or "Prosecuted. Everything is up to date."
-          - TERMINOLOGY: "Posted" or "Cleared" means the bill is PAID.`,
-          tools: [{
-            functionDeclarations: [
-              {
-                name: "addBill",
-                description: "Adds a new monthly bill.",
-                parameters: {
-                  type: Type.OBJECT,
-                  properties: {
-                    name: { type: Type.STRING },
-                    amount: { type: Type.NUMBER },
-                    phase: { type: Type.STRING, enum: ["1", "2"] },
-                    date: { type: Type.STRING, description: "YYYY-MM-DD" }
-                  },
-                  required: ["name", "amount", "phase"]
-                }
-              },
-              {
-                name: "toggleBillStatus",
-                description: "Marks a bill as paid or unpaid. REQUIRES amount and date for verification.",
-                parameters: {
-                  type: Type.OBJECT,
-                  properties: {
-                    name: { type: Type.STRING, description: "Name of the bill to toggle" },
-                    paid: { type: Type.BOOLEAN, description: "True if paid, false if unpaid" },
-                    amount: { type: Type.NUMBER, description: "The amount of the bill (required for verification)" },
-                    date: { type: Type.STRING, description: "The post date (YYYY-MM-DD, required for verification)" }
-                  },
-                  required: ["name", "paid", "amount", "date"]
-                }
-              },
-              {
-                name: "updateBillAmount",
-                description: "Updates the dollar amount for an existing bill.",
-                parameters: {
-                  type: Type.OBJECT,
-                  properties: {
-                    name: { type: Type.STRING, description: "Name of the bill" },
-                    amount: { type: Type.NUMBER, description: "New dollar amount" }
-                  },
-                  required: ["name", "amount"]
-                }
-              },
-              {
-                name: "addFlow",
-                description: "Logs income.",
-                parameters: {
-                  type: Type.OBJECT,
-                  properties: {
-                    tracker: { type: Type.STRING, enum: ["income"] },
-                    account: { type: Type.STRING },
-                    amount: { type: Type.NUMBER },
-                    description: { type: Type.STRING },
-                    date: { type: Type.STRING, description: "YYYY-MM-DD" }
-                  },
-                  required: ["tracker", "account", "amount"]
-                }
-              },
-              {
-                name: "updateSnapshot",
-                description: "Updates account balances for debt, investment, savings, tax, or retirement.",
-                parameters: {
-                  type: Type.OBJECT,
-                  properties: {
-                    tracker: { type: Type.STRING, enum: ["investment", "debt", "savings", "assumptions", "tax", "retirement"] },
-                    account: { type: Type.STRING },
-                    amount: { type: Type.NUMBER }
-                  },
-                  required: ["tracker", "account", "amount"]
-                }
-              },
-              {
-                name: "updateCurrentBalance",
-                description: "Updates the main current cash balance.",
-                parameters: {
-                  type: Type.OBJECT,
-                  properties: {
-                    amount: { type: Type.NUMBER }
-                  },
-                  required: ["amount"]
-                }
-              },
-              {
-                name: "addDebtPayment",
-                description: "Logs a payment towards a specific debt account.",
-                parameters: {
-                  type: Type.OBJECT,
-                  properties: {
-                    account: { type: Type.STRING },
-                    amount: { type: Type.NUMBER }
-                  },
-                  required: ["account", "amount"]
-                }
-              },
-              {
-                name: "addGlobalExpense",
-                description: "Adds a one-off global expense.",
-                parameters: {
-                  type: Type.OBJECT,
-                  properties: {
-                    name: { type: Type.STRING },
-                    amount: { type: Type.NUMBER }
-                  },
-                  required: ["name", "amount"]
-                }
-              },
-              {
-                name: "deleteBill",
-                description: "Deletes a bill from the monthly list.",
-                parameters: {
-                  type: Type.OBJECT,
-                  properties: {
-                    name: { type: Type.STRING }
-                  },
-                  required: ["name"]
-                }
-              },
-              {
-                name: "getFinancialStatus",
-                description: "Gets the full financial status for the current month.",
-                parameters: { type: Type.OBJECT, properties: {} }
-              },
-              {
-                name: "executePendingAction",
-                description: "Executes the currently queued action that is visible on Ryan's screen.",
-                parameters: { type: Type.OBJECT, properties: {} }
-              }
-            ]
-          }]
-        },
-        callbacks: {
-          onopen: () => {
-            setIsRecording(true);
-            setAiStatus('listening');
-            startMic();
-          },
-          onmessage: async (message: LiveServerMessage) => {
-            // Handle audio and text parts
-            if (message.serverContent?.modelTurn?.parts) {
-              for (const part of message.serverContent.modelTurn.parts) {
-                if (part.inlineData?.data) {
-                  const audioData = base64ToUint8Array(part.inlineData.data);
-                  const pcmData = new Int16Array(audioData.buffer, audioData.byteOffset, audioData.byteLength / 2);
-                  audioQueueRef.current.push(pcmData);
-                  if (!isPlayingRef.current) playNextInQueue();
-                }
-              }
-            }
-
-            // Handle interruptions
-            if (message.serverContent?.interrupted) {
-              audioQueueRef.current = [];
-              isPlayingRef.current = false;
-              // We don't have a direct way to stop the current buffer source easily without 
-              // keeping track of it, but clearing the queue prevents further playback.
-            }
-
-            // Handle tool calls
-            if (message.toolCall) {
-              const { functionCalls } = message.toolCall;
-              const functionResponses = [];
-              setAiStatus('thinking');
-
-              for (const call of functionCalls) {
-                const { name, id } = call as any;
-                if (name === "getFinancialStatus") {
-                  const result = await getFinancialStatus();
-                  functionResponses.push({ name, response: result, id });
-                } else if (name === "executePendingAction") {
-                  if (pendingActionRef.current) {
-                    const responses = await handleApproveAction(true); // Don't send yet
-                    if (responses) functionResponses.push(...responses);
-                    functionResponses.push({ name, response: { status: "success", message: "Action executed successfully." }, id });
-                  } else {
-                    functionResponses.push({ name, response: { status: "error", message: "No pending action to execute." }, id });
-                  }
-                }
-              }
-
-              const writeCalls = functionCalls.filter((c: any) => c.name !== "getFinancialStatus" && c.name !== "executePendingAction");
-              if (writeCalls.length > 0) {
-                setPendingAction({ calls: writeCalls });
-              }
-
-              if (functionResponses.length > 0) {
-                sessionRef.current?.sendToolResponse({ functionResponses });
-              }
-            }
-          },
-          onclose: () => { stopMic(); setIsRecording(false); setIsConnecting(false); setAiStatus('idle'); },
-          onerror: (err) => { console.error(err); stopMic(); setIsRecording(false); setIsConnecting(false); setAiStatus('idle'); }
-        }
-      });
-      sessionRef.current = session;
-    } catch (err) { console.error(err); setIsConnecting(false); setAiStatus('idle'); }
+  // --- Command Execution ---
+  const executeCommand = (input: string) => {
+    const result = parseCommand(input);
+    if ('error' in result) {
+      setCommandHistory(prev => [...prev, { input, result: result.error, success: false }]);
+      return;
+    }
+    setCommandHistory(prev => [...prev, { input, result: result.message, success: true }]);
+    setPendingAction(result.action);
   };
 
-  const handleApproveAction = async (skipSendResponse = false) => {
+  // --- Action Handlers ---
+  const handleApproveAction = async () => {
     const action = pendingActionRef.current;
-    if (!action) return null;
-    
-    setAiStatus('thinking');
-    const functionResponses = [];
+    if (!action) return;
+
     try {
       for (const call of action.calls) {
-        const { name, id } = call as any;
         const args = { ...call.args };
         if (args.amount !== undefined) args.amount = parseFloat(args.amount) || 0;
-        let result;
-        if (name === "addBill") result = await addBill({ ...args, phase: parseInt(args.phase) });
-        if (name === "toggleBillStatus") result = await toggleBillStatus(args);
-        if (name === "updateBillAmount") result = await updateBillAmount(args);
-        if (name === "addFlow") result = await addFlow(args);
-        if (name === "updateSnapshot") result = await updateSnapshot(args);
-        if (name === "updateCurrentBalance") result = await updateCurrentBalance(args);
-        if (name === "addDebtPayment") result = await addDebtPayment(args);
-        if (name === "addGlobalExpense") result = await addGlobalExpense(args);
-        if (name === "deleteBill") result = await deleteBill(args);
-        if (name === "getFinancialStatus") result = await getFinancialStatus();
-        functionResponses.push({ name, response: result, id });
+        const name = call.name;
+
+        if (name === "addBill") addBillLocal(args.name, args.amount, parseInt(args.phase));
+        else if (name === "toggleBillStatus") {
+          const currentBills = billsRef.current;
+          const searchName = args.name.toLowerCase();
+          let bill = currentBills.find(b => b.name.toLowerCase() === searchName);
+          if (!bill) bill = currentBills.find(b => b.name.toLowerCase().includes(searchName));
+          if (bill) {
+            const updatedBills = currentBills.map(b =>
+              b.id === bill!.id ? { ...b, paid: args.paid ?? true, amount: args.amount ?? b.amount, date: args.date ?? b.date } : b
+            );
+            saveToLocal(`bills_${activeMonth}`, updatedBills);
+          }
+        }
+        else if (name === "updateBillAmount") {
+          const bill = bills.find(b => b.name.toLowerCase().includes(args.name.toLowerCase()));
+          if (bill) updateBillLocal(bill.id, { amount: args.amount });
+        }
+        else if (name === "addFlow") addFlowLocal(args.tracker, args.account, args.amount, args.description, args.date);
+        else if (name === "updateSnapshot") addSnapshotLocal(args.tracker, args.account, args.amount);
+        else if (name === "updateCurrentBalance") updateBalance(args.amount);
+        else if (name === "addDebtPayment") addDebtPaymentLocal(args.account, args.amount);
+        else if (name === "addGlobalExpense") {
+          const newExp: GlobalExpense = { id: Date.now(), name: args.name, amount: args.amount, paid: false };
+          saveToLocal('global_expenses', [...expenses, newExp]);
+        }
+        else if (name === "deleteBill") {
+          const bill = bills.find(b => b.name.toLowerCase().includes(args.name.toLowerCase()));
+          if (bill) saveToLocal(`bills_${activeMonth}`, bills.filter(b => b.id !== bill.id));
+        }
       }
-      
-      if (!skipSendResponse) {
-        sessionRef.current?.sendToolResponse({ functionResponses });
-      }
+      setCommandHistory(prev => [...prev, { input: '', result: 'Prosecuted. Records updated.', success: true }]);
       setPendingAction(null);
-      return functionResponses;
     } catch (err) {
-      console.error("Error approving action:", err);
-      return null;
-    } finally {
-      setAiStatus(isRecordingRef.current ? 'listening' : 'idle');
+      console.error("Error executing action:", err);
+      setCommandHistory(prev => [...prev, { input: '', result: `Error: ${err}`, success: false }]);
     }
   };
 
   const handleRejectAction = () => {
-    const action = pendingActionRef.current;
-    if (!action) return;
-    
-    const functionResponses = action.calls.map((call: any) => ({
-      name: call.name,
-      response: { status: "error", message: "User rejected the action." },
-      id: call.id
-    }));
-    
-    sessionRef.current?.sendToolResponse({ functionResponses });
     setPendingAction(null);
-  };
-
-  const startMic = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ 
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true
-        } 
-      });
-      streamRef.current = stream;
-      
-      if (!audioContextRef.current) {
-        const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
-        try {
-          audioContextRef.current = new AudioContextClass({ sampleRate: 24000 });
-        } catch (e) {
-          audioContextRef.current = new AudioContextClass();
-        }
-      }
-      
-      if (audioContextRef.current.state === 'suspended') {
-        await audioContextRef.current.resume();
-      }
-
-      const source = audioContextRef.current.createMediaStreamSource(stream);
-      const processor = audioContextRef.current.createScriptProcessor(CHUNK_SIZE, 1, 1);
-      
-      processor.onaudioprocess = (e) => {
-        if (sessionRef.current && audioContextRef.current) {
-          const inputData = e.inputBuffer.getChannelData(0);
-          const pcm16 = floatTo16BitPCM(inputData);
-          const uint8 = new Uint8Array(pcm16.buffer);
-          let binary = '';
-          for (let i = 0; i < uint8.length; i++) {
-            binary += String.fromCharCode(uint8[i]);
-          }
-          const base64 = btoa(binary);
-          sessionRef.current.sendRealtimeInput({ media: { data: base64, mimeType: `audio/pcm;rate=${audioContextRef.current.sampleRate}` } });
-        }
-      };
-      
-      source.connect(processor);
-      // Connect to a GainNode with 0 gain instead of destination to avoid echo
-      const silentGain = audioContextRef.current.createGain();
-      silentGain.gain.value = 0;
-      processor.connect(silentGain);
-      silentGain.connect(audioContextRef.current.destination);
-      processorRef.current = processor;
-    } catch (err) {
-      console.error("Error starting mic:", err);
-    }
-  };
-
-  const stopMic = () => {
-    streamRef.current?.getTracks().forEach(track => track.stop());
-    processorRef.current?.disconnect();
-    setIsRecording(false);
-  };
-
-  const playNextInQueue = () => {
-    if (audioQueueRef.current.length === 0 || !audioContextRef.current) {
-      isPlayingRef.current = false;
-      setAiStatus(isRecordingRef.current ? 'listening' : 'idle');
-      return;
-    }
-    
-    if (audioContextRef.current.state === 'suspended') {
-      audioContextRef.current.resume();
-    }
-
-    isPlayingRef.current = true;
-    setAiStatus('speaking');
-    
-    // Buffering: If we have very few chunks, wait a tiny bit longer to ensure continuity
-    if (audioQueueRef.current.length < 3 && audioQueueRef.current.length > 0) {
-      setTimeout(playNextInQueue, 50);
-      return;
-    }
-
-    // Combine all current chunks to reduce gaps
-    const totalLength = audioQueueRef.current.reduce((acc, curr) => acc + curr.length, 0);
-    const combinedPcm = new Int16Array(totalLength);
-    let offset = 0;
-    while (audioQueueRef.current.length > 0) {
-      const chunk = audioQueueRef.current.shift()!;
-      combinedPcm.set(chunk, offset);
-      offset += chunk.length;
-    }
-
-    const floatData = new Float32Array(combinedPcm.length);
-    for (let i = 0; i < combinedPcm.length; i++) {
-      floatData[i] = combinedPcm[i] / 0x8000;
-    }
-
-    if (floatData.length === 0) {
-      isPlayingRef.current = false;
-      setAiStatus(isRecordingRef.current ? 'listening' : 'idle');
-      return;
-    }
-
-    const buffer = audioContextRef.current.createBuffer(1, floatData.length, 24000);
-    buffer.getChannelData(0).set(floatData);
-    const source = audioContextRef.current.createBufferSource();
-    source.buffer = buffer;
-    source.connect(audioContextRef.current.destination);
-    source.onended = () => {
-      // Small delay to allow more chunks to arrive before deciding we're done
-      setTimeout(playNextInQueue, 10);
-    };
-    source.start();
-  };
-
-  const disconnectVoice = () => {
-    sessionRef.current?.close();
-    sessionRef.current = null;
-    stopMic();
+    setCommandHistory(prev => [...prev, { input: '', result: 'Action cancelled.', success: false }]);
   };
 
   // --- UI Helpers ---
@@ -1220,7 +883,10 @@ export default function App() {
       </div>
 
       <div className="bills-card">
-        <div className="text-xs text-text-muted font-bold mb-4 uppercase tracking-wider">Phase 1 (1st - 15th)</div>
+        <div className="flex justify-between items-center mb-4">
+          <div className="text-xs text-text-muted font-bold uppercase tracking-wider">Phase 1 (1st - 15th)</div>
+          <div className="text-xs font-black text-accent-blue">{formatMoney(bills.filter(b => b.phase === 1).reduce((s, b) => s + b.amount, 0))}</div>
+        </div>
         <div className="divide-y divide-border-subtle">
           {sortBills(bills.filter(b => b.phase === 1)).map(b => (
             <div key={b.id} className="py-3 flex items-center gap-4">
@@ -1261,7 +927,10 @@ export default function App() {
       </div>
 
       <div className="bills-card">
-        <div className="text-xs text-text-muted font-bold mb-4 uppercase tracking-wider">Phase 2 (16th - End)</div>
+        <div className="flex justify-between items-center mb-4">
+          <div className="text-xs text-text-muted font-bold uppercase tracking-wider">Phase 2 (16th - End)</div>
+          <div className="text-xs font-black text-accent-blue">{formatMoney(bills.filter(b => b.phase === 2).reduce((s, b) => s + b.amount, 0))}</div>
+        </div>
         <div className="divide-y divide-border-subtle">
           {sortBills(bills.filter(b => b.phase === 2)).map(b => (
             <div key={b.id} className="py-3 flex items-center gap-4">
@@ -2165,11 +1834,11 @@ export default function App() {
       <header className="flex items-center p-4 bg-bg-card border-b border-border-subtle sticky top-0 z-40">
         <button onClick={() => setIsMenuOpen(true)} className="mr-4 text-2xl cursor-pointer">☰</button>
         <div className="text-xl font-black tracking-tight">Ryan's Finance Dashboard</div>
-        <button 
-          onClick={() => setShowVoicePanel(true)}
+        <button
+          onClick={() => setShowCommandPanel(true)}
           className="ml-auto w-10 h-10 bg-accent-blue rounded-full flex items-center justify-center text-bg-main shadow-lg shadow-accent-blue/20"
         >
-          <Mic size={20} />
+          <MessageSquare size={20} />
         </button>
       </header>
 
@@ -2247,7 +1916,7 @@ export default function App() {
               onChange={(e) => setActiveMonth(`${e.target.value}-${activeMonth.split('-')[1]}`)}
               className="bills-input flex-1 py-2 font-bold"
             >
-              {[2024, 2025, 2026].map(y => <option key={y} value={y}>{y}</option>)}
+              {Array.from({ length: 5 }, (_, i) => new Date().getFullYear() - 2 + i).map(y => <option key={y} value={y}>{y}</option>)}
             </select>
             <select 
               value={activeMonth.split('-')[1]} 
@@ -2257,6 +1926,11 @@ export default function App() {
               {['01','02','03','04','05','06','07','08','09','10','11','12'].map(m => <option key={m} value={m}>{new Date(2000, parseInt(m)-1).toLocaleString('default', {month: 'long'})}</option>)}
             </select>
           </div>
+          {lastSynced && (
+            <div className="text-[10px] text-text-muted font-bold mt-2 text-right uppercase tracking-wider">
+              Synced {lastSynced.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}
+            </div>
+          )}
         </div>
       </div>
 
@@ -2295,75 +1969,35 @@ export default function App() {
         )}
       </main>
 
-      {/* Voice Assistant Panel */}
+      {/* Command Center Panel */}
       <AnimatePresence>
-        {showVoicePanel && (
-          <motion.div 
+        {showCommandPanel && (
+          <motion.div
             initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
             className="fixed inset-0 bg-bg-main/80 backdrop-blur-md z-50 flex items-end sm:items-center justify-center p-4"
           >
-            <motion.div 
+            <motion.div
               initial={{ y: 100, scale: 0.95 }} animate={{ y: 0, scale: 1 }} exit={{ y: 100, scale: 0.95 }}
               className="bg-bg-card w-full max-w-lg rounded-3xl border border-border-subtle shadow-2xl overflow-hidden flex flex-col max-h-[90vh]"
             >
+              {/* Header */}
               <div className="p-6 flex items-center justify-between border-b border-border-subtle shrink-0">
                 <div className="flex items-center gap-3">
                   <div className="w-10 h-10 bg-accent-blue rounded-full flex items-center justify-center text-bg-main">
-                    <Mic size={20} />
+                    <MessageSquare size={20} />
                   </div>
                   <div>
-                    <h2 className="font-black">Finny</h2>
-                    <div className="flex items-center gap-2">
-                      <p className="text-[10px] text-text-muted font-bold uppercase tracking-widest">AI Voice Assistant</p>
-                      {isRecording && <div className="w-1.5 h-1.5 rounded-full bg-accent-green animate-pulse" />}
-                    </div>
+                    <h2 className="font-black">Command Center</h2>
+                    <p className="text-[10px] text-text-muted font-bold uppercase tracking-widest">Quick Actions</p>
                   </div>
                 </div>
-                <div className="flex gap-2">
-                  {isRecording && (
-                    <button 
-                      onClick={() => { audioQueueRef.current = []; setAiStatus('listening'); }}
-                      className="p-2 text-text-muted hover:text-accent-blue transition-colors"
-                      title="Clear Audio Queue"
-                    >
-                      <RotateCcw size={18} />
-                    </button>
-                  )}
-                  <button onClick={() => { disconnectVoice(); setShowVoicePanel(false); }} className="p-2 text-text-muted hover:text-white transition-colors"><X size={20} /></button>
-                </div>
+                <button onClick={() => setShowCommandPanel(false)} className="p-2 text-text-muted hover:text-white transition-colors"><X size={20} /></button>
               </div>
 
-              <div className="flex-1 overflow-y-auto custom-scrollbar">
-                {/* Persistent AI Visualizer */}
-                <div className="p-8 flex flex-col items-center justify-center border-b border-border-subtle bg-accent-blue/5">
-                  <div className="relative h-16 flex items-center justify-center mb-3">
-                    <AnimatePresence mode="wait">
-                      {aiStatus === 'listening' && (
-                        <motion.div key="listening" className="flex gap-1.5">
-                          {[1, 2, 3, 4, 5, 6, 7].map((i) => (
-                            <motion.div key={i} animate={{ height: [12, 48, 12] }} transition={{ repeat: Infinity, duration: 0.6, delay: i * 0.1 }} className="w-2 bg-accent-blue rounded-full shadow-[0_0_15px_rgba(59,130,246,0.4)]" />
-                          ))}
-                        </motion.div>
-                      )}
-                      {aiStatus === 'speaking' && (
-                        <motion.div key="speaking" className="flex gap-2.5">
-                          {[1, 2, 3, 4].map((i) => (
-                            <motion.div key={i} animate={{ scale: [1, 1.8, 1], opacity: [0.6, 1, 0.6] }} transition={{ repeat: Infinity, duration: 1, delay: i * 0.2 }} className="w-6 h-6 bg-accent-green rounded-full shadow-[0_0_20px_rgba(16,185,129,0.5)]" />
-                          ))}
-                        </motion.div>
-                      )}
-                      {aiStatus === 'thinking' && <motion.div key="thinking" animate={{ rotate: 360 }} transition={{ repeat: Infinity, duration: 1, ease: "linear" }}><Loader2 className="text-accent-blue w-12 h-12" /></motion.div>}
-                      {aiStatus === 'idle' && <motion.div key="idle" className="w-14 h-14 bg-border-subtle rounded-full flex items-center justify-center text-text-muted"><MicOff size={28} /></motion.div>}
-                    </AnimatePresence>
-                  </div>
-                  <div className="text-xs font-black uppercase tracking-[0.3em] text-accent-blue animate-pulse">
-                    {aiStatus === 'listening' ? "Finny is Listening..." : 
-                     aiStatus === 'speaking' ? "Finny is Speaking" : 
-                     aiStatus === 'thinking' ? "Processing Action" : "Voice Idle"}
-                  </div>
-                </div>
-
-                <div className="p-6">
+              {/* Scrollable Content */}
+              <div className="flex-1 overflow-y-auto">
+                <div className="p-6 space-y-4">
+                  {/* Pending Action Review */}
                   {pendingAction ? (
                     <div className="space-y-6">
                       <div className="text-center space-y-2">
@@ -2372,7 +2006,7 @@ export default function App() {
                           Action Required
                         </div>
                         <h3 className="text-lg font-black uppercase">Review & Execute</h3>
-                        <p className="text-xs text-text-muted">Verify the details below and say "Prosecute" or hit the button.</p>
+                        <p className="text-xs text-text-muted">Verify the details below, then Prosecute.</p>
                       </div>
 
                       <div className="space-y-4">
@@ -2381,16 +2015,16 @@ export default function App() {
                             <div className="flex items-center gap-2 mb-4">
                               <div className="w-2 h-2 rounded-full bg-accent-blue shadow-[0_0_8px_rgba(59,130,246,0.5)]" />
                               <div className="text-xs font-black text-white uppercase tracking-wider">
-                                {call.name === 'toggleBillStatus' ? `Pay ${call.args.name}` : call.name.replace(/([A-Z])/g, ' $1')}
+                                {call.name === 'toggleBillStatus' ? `Pay ${call.args.name}` :
+                                 call.name === 'deleteBill' ? `Delete ${call.args.name}` :
+                                 call.name.replace(/([A-Z])/g, ' $1')}
                               </div>
                             </div>
-                            
                             <div className="grid grid-cols-1 gap-4">
                               {Object.entries(call.args)
                                 .filter(([key]) => key !== 'paid')
                                 .sort(([keyA], [keyB]) => {
-                                  // Custom order: name, amount, date, then others
-                                  const order = { name: 1, amount: 2, date: 3 };
+                                  const order = { name: 1, account: 1, amount: 2, date: 3 };
                                   const valA = order[keyA as keyof typeof order] || 99;
                                   const valB = order[keyB as keyof typeof order] || 99;
                                   if (valA !== valB) return valA - valB;
@@ -2425,7 +2059,7 @@ export default function App() {
                                         />
                                       </>
                                     ) : key.toLowerCase().includes('date') ? (
-                                      <input 
+                                      <input
                                         type="date"
                                         value={val as string}
                                         onChange={(e) => {
@@ -2436,7 +2070,7 @@ export default function App() {
                                         className="w-full bg-black/40 border border-white/10 rounded-xl px-3 py-2.5 text-xs font-black text-accent-blue focus:border-accent-blue focus:bg-black/60 outline-none transition-all"
                                       />
                                     ) : (
-                                      <input 
+                                      <input
                                         type="text"
                                         value={val as string}
                                         onChange={(e) => {
@@ -2456,14 +2090,14 @@ export default function App() {
                       </div>
 
                       <div className="flex gap-3 pt-4">
-                        <button 
+                        <button
                           onClick={handleRejectAction}
                           className="flex-1 py-4 rounded-2xl border border-border-subtle text-text-muted font-black text-xs uppercase hover:bg-white/5 transition-all active:scale-95"
                         >
                           Cancel
                         </button>
-                        <button 
-                          onClick={() => handleApproveAction(false)}
+                        <button
+                          onClick={handleApproveAction}
                           className="flex-[2] py-4 rounded-2xl bg-accent-blue text-white font-black text-xs uppercase hover:bg-accent-blue-dark transition-all active:scale-95 shadow-lg shadow-accent-blue/30 flex items-center justify-center gap-2"
                         >
                           <Check size={18} />
@@ -2472,35 +2106,77 @@ export default function App() {
                       </div>
                     </div>
                   ) : (
-                    <div className="flex flex-col items-center justify-center min-h-[200px] text-center">
-                      <div className="space-y-4">
-                        <div className="w-16 h-16 mx-auto bg-accent-blue/10 rounded-full flex items-center justify-center text-accent-blue">
-                          <Mic size={32} />
-                        </div>
+                    <>
+                      {/* Command History */}
+                      {commandHistory.length > 0 ? (
                         <div className="space-y-2">
-                          <p className="text-lg font-black uppercase tracking-tight">Ready to Help</p>
-                          <p className="text-xs text-text-muted max-w-[200px] mx-auto">
-                            Talk naturally about your bills, income, or investment balances.
-                          </p>
+                          {commandHistory.slice(-8).map((entry, idx) => (
+                            <div key={idx} className="space-y-1">
+                              {entry.input && (
+                                <div className="text-xs font-mono text-text-muted px-1">{'>'} {entry.input}</div>
+                              )}
+                              <div className={`text-xs font-black px-3 py-2 rounded-xl ${entry.success ? 'bg-accent-green/10 text-accent-green' : 'bg-white/5 text-text-muted'}`}>
+                                {entry.result.split("\n").map((line, i) => <div key={i}>{line}</div>)}
+                              </div>
+                            </div>
+                          ))}
                         </div>
-                      </div>
-                    </div>
+                      ) : (
+                        <div className="flex flex-col items-center justify-center min-h-[200px] text-center">
+                          <div className="space-y-4">
+                            <div className="w-16 h-16 mx-auto bg-accent-blue/10 rounded-full flex items-center justify-center text-accent-blue">
+                              <MessageSquare size={32} />
+                            </div>
+                            <div className="space-y-2">
+                              <p className="text-lg font-black uppercase tracking-tight">Command Center</p>
+                              <p className="text-xs text-text-muted max-w-[240px] mx-auto leading-relaxed">
+                                Type commands to manage your finances. Try:
+                              </p>
+                              <div className="space-y-1.5 text-left max-w-[260px] mx-auto">
+                                {[
+                                  'pay mortgage',
+                                  'balance 15000',
+                                  'tsp 47000',
+                                  'income usaf 3500',
+                                  'debt amex 500',
+                                ].map(cmd => (
+                                  <button
+                                    key={cmd}
+                                    onClick={() => { setCommandInput(cmd); commandInputRef.current?.focus(); }}
+                                    className="block w-full text-left px-3 py-1.5 rounded-lg bg-white/5 text-[11px] font-mono text-accent-blue hover:bg-white/10 transition-colors"
+                                  >
+                                    {cmd}
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                    </>
                   )}
                 </div>
               </div>
 
-              <div className="p-6 bg-bg-main/50 border-t border-border-subtle shrink-0">
-                {!isRecording ? (
-                  <button onClick={connectVoice} disabled={isConnecting} className="bills-btn flex items-center justify-center gap-3 disabled:opacity-50">
-                    {isConnecting ? <Loader2 className="animate-spin" /> : <Mic size={24} />}
-                    {isConnecting ? "Connecting..." : "Start Conversation"}
+              {/* Command Input */}
+              <div className="p-4 bg-bg-main/50 border-t border-border-subtle shrink-0">
+                <form onSubmit={(e) => { e.preventDefault(); if (commandInput.trim()) { executeCommand(commandInput); setCommandInput(''); } }} className="flex gap-2">
+                  <input
+                    ref={commandInputRef}
+                    autoFocus
+                    type="text"
+                    value={commandInput}
+                    onChange={(e) => setCommandInput(e.target.value)}
+                    placeholder="pay mortgage, balance 15000, tsp 47000..."
+                    className="flex-1 bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-sm font-bold text-white placeholder:text-text-muted/50 focus:border-accent-blue focus:bg-black/60 outline-none transition-all"
+                  />
+                  <button
+                    type="submit"
+                    className="w-12 h-12 bg-accent-blue rounded-xl flex items-center justify-center text-bg-main shadow-lg shadow-accent-blue/20 active:scale-95 transition-transform"
+                  >
+                    <Send size={18} />
                   </button>
-                ) : (
-                  <button onClick={disconnectVoice} className="bills-btn border-accent-red text-accent-red flex items-center justify-center gap-3">
-                    <MicOff size={24} />
-                    Stop Conversation
-                  </button>
-                )}
+                </form>
               </div>
             </motion.div>
           </motion.div>
